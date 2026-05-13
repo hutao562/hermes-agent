@@ -1218,6 +1218,7 @@ class GatewayRunner:
         # preserve the queue.
         self._queued_events: Dict[str, List[MessageEvent]] = {}
         self._pending_native_image_paths_by_session: Dict[str, List[str]] = {}
+        self._pending_native_video_paths_by_session: Dict[str, List[str]] = {}
         self._busy_ack_ts: Dict[str, float] = {}  # last busy-ack timestamp per session (debounce)
         self._session_run_generation: Dict[str, int] = {}
         # LRU cache of live SessionSources keyed by session_key. Used by
@@ -6750,6 +6751,7 @@ class GatewayRunner:
         # Reset only this session's per-call buffer; other sessions may be
         # concurrently preparing multimodal turns on the same runner.
         self._consume_pending_native_image_paths(session_key)
+        self._consume_pending_native_video_paths(session_key)
 
         _is_shared_multi_user = is_shared_multi_user_session(
             source,
@@ -6762,12 +6764,15 @@ class GatewayRunner:
         if event.media_urls:
             image_paths = []
             audio_paths = []
+            video_paths = []
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
                 if mtype.startswith("image/") or event.message_type == MessageType.PHOTO:
                     image_paths.append(path)
                 if mtype.startswith("audio/") or event.message_type in {MessageType.VOICE, MessageType.AUDIO}:
                     audio_paths.append(path)
+                if mtype.startswith("video/") or event.message_type == MessageType.VIDEO:
+                    video_paths.append(path)
 
             if image_paths:
                 # Decide routing: native (attach pixels) vs text (vision_analyze
@@ -6827,6 +6832,17 @@ class GatewayRunner:
                             )
                         except Exception:
                             pass
+
+            if video_paths:
+                pending_native_videos = getattr(self, "_pending_native_video_paths_by_session", None)
+                if pending_native_videos is None:
+                    pending_native_videos = {}
+                    self._pending_native_video_paths_by_session = pending_native_videos
+                pending_native_videos[session_key] = list(video_paths)
+                logger.info(
+                    "Video routing: native. %d video(s) will be attached inline.",
+                    len(video_paths),
+                )
 
         if event.media_urls and event.message_type == MessageType.DOCUMENT:
             import mimetypes as _mimetypes
@@ -6930,6 +6946,12 @@ class GatewayRunner:
             return []
         return list(pending_native.pop(session_key, []) or [])
 
+    def _consume_pending_native_video_paths(self, session_key: str) -> List[str]:
+        pending_native = getattr(self, "_pending_native_video_paths_by_session", None)
+        if not pending_native:
+            return []
+        return list(pending_native.pop(session_key, []) or [])
+
     def _cache_session_source(self, session_key: str, source) -> None:
         if not session_key or source is None:
             return
@@ -6967,6 +6989,13 @@ class GatewayRunner:
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
+        # HERMES_FEISHU_CARD_PATCH_BEGIN
+        try:
+            from hermes_feishu_card.hook_runtime import emit_from_hermes_locals as _hfc_emit
+            _hfc_emit(locals())
+        except Exception:
+            pass
+        # HERMES_FEISHU_CARD_PATCH_END
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
         _msg_preview = (event.text or "")[:80].replace("\n", " ")
@@ -7908,6 +7937,36 @@ class GatewayRunner:
                         logger.debug("trailing footer send failed: %s", _e)
                 return None
 
+            # HERMES_FEISHU_CARD_COMPLETE_PATCH_BEGIN
+            try:
+                from hermes_feishu_card.hook_runtime import build_event as _hfc_build_event
+                from hermes_feishu_card.hook_runtime import emit_from_hermes_locals_async as _hfc_emit_async
+                from hermes_feishu_card.hook_runtime import should_suppress_native_response as _hfc_should_suppress
+                _hfc_completed_locals = {
+                    **locals(),
+                    "answer": response,
+                    "duration": _response_time,
+                    "model": agent_result.get("model", ""),
+                    "tokens": {
+                        "input_tokens": agent_result.get("input_tokens", 0),
+                        "output_tokens": agent_result.get("output_tokens", 0),
+                    },
+                    "context": {
+                        "used_tokens": agent_result.get("last_prompt_tokens", 0),
+                        "max_tokens": agent_result.get("context_length", 0),
+                    },
+                }
+                _hfc_completed_event = _hfc_build_event("message.completed", _hfc_completed_locals, preview=True)
+                _hfc_attachments = []
+                if _hfc_completed_event is not None:
+                    _hfc_attachments = _hfc_completed_event.get("data", {}).get("attachments", [])
+                _hfc_card_delivered = await _hfc_emit_async(_hfc_completed_locals, event_name="message.completed")
+                _hfc_platform = getattr(source.platform, "value", source.platform)
+                if _hfc_should_suppress(_hfc_platform, _hfc_card_delivered, _hfc_attachments):
+                    return None
+            except Exception:
+                pass
+            # HERMES_FEISHU_CARD_COMPLETE_PATCH_END
             return response
             
         except Exception as e:
@@ -14279,6 +14338,24 @@ class GatewayRunner:
 
         def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
             """Callback invoked by agent on tool lifecycle events."""
+            # HERMES_FEISHU_CARD_TOOL_PATCH_BEGIN
+            try:
+                from hermes_feishu_card.hook_runtime import emit_from_hermes_locals_threadsafe as _hfc_emit_threadsafe
+                if event_type in ("tool.started", "tool.completed") and _run_still_current():
+                    if _hfc_emit_threadsafe({
+                        **locals(),
+                        "source": source,
+                        "message_id": event_message_id,
+                        "_hfc_loop": _loop_for_step,
+                        "tool_id": tool_name or "tool",
+                        "name": tool_name or "tool",
+                        "status": "completed" if event_type == "tool.completed" else "running",
+                        "detail": preview or "",
+                    }, event_name="tool.updated"):
+                        return
+            except Exception:
+                pass
+            # HERMES_FEISHU_CARD_TOOL_PATCH_END
             if not progress_queue or not _run_still_current():
                 return
 
@@ -14827,6 +14904,21 @@ class GatewayRunner:
                         )
                         if _want_stream_deltas:
                             def _stream_delta_cb(text: str) -> None:
+                                # HERMES_FEISHU_CARD_ANSWER_DELTA_PATCH_BEGIN
+                                try:
+                                    from hermes_feishu_card.hook_runtime import emit_from_hermes_locals_threadsafe as _hfc_emit_threadsafe
+                                    if text and _run_still_current():
+                                        if _hfc_emit_threadsafe({
+                                            **locals(),
+                                            "source": source,
+                                            "message_id": event_message_id,
+                                            "_hfc_loop": _loop_for_step,
+                                            "text": text,
+                                        }, event_name="answer.delta"):
+                                            return
+                                except Exception:
+                                    pass
+                                # HERMES_FEISHU_CARD_ANSWER_DELTA_PATCH_END
                                 if _run_still_current():
                                     _stream_consumer.on_delta(text)
                         stream_consumer_holder[0] = _stream_consumer
@@ -14834,6 +14926,21 @@ class GatewayRunner:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
 
             def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
+                # HERMES_FEISHU_CARD_THINKING_DELTA_PATCH_BEGIN
+                try:
+                    from hermes_feishu_card.hook_runtime import emit_from_hermes_locals_threadsafe as _hfc_emit_threadsafe
+                    if text and not already_streamed and _run_still_current():
+                        if _hfc_emit_threadsafe({
+                            **locals(),
+                            "source": source,
+                            "message_id": event_message_id,
+                            "_hfc_loop": _loop_for_step,
+                            "text": text,
+                        }, event_name="thinking.delta"):
+                            return
+                except Exception:
+                    pass
+                # HERMES_FEISHU_CARD_THINKING_DELTA_PATCH_END
                 if not _run_still_current():
                     return
                 if _stream_consumer is not None:
@@ -15296,31 +15403,33 @@ class GatewayRunner:
             _approval_session_token = set_current_session_key(_approval_session_key)
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
             try:
-                # If _prepare_inbound_message_text buffered image paths for native
+                # If _prepare_inbound_message_text buffered media paths for native
                 # attachment, wrap the user turn as an OpenAI-style multimodal
                 # content list. Consume-and-clear so subsequent turns on the same
-                # runner instance don't re-attach stale images.
+                # runner instance don't re-attach stale media.
                 _native_imgs = self._consume_pending_native_image_paths(session_key)
-                if _native_imgs:
+                _native_videos = self._consume_pending_native_video_paths(session_key)
+                if _native_imgs or _native_videos:
                     try:
                         from agent.image_routing import build_native_content_parts
                         _parts, _skipped = build_native_content_parts(
                             message,
                             _native_imgs,
+                            _native_videos,
                         )
                         if _skipped:
                             logger.warning(
-                                "Native image attachment: skipped %d unreadable path(s): %s",
+                                "Native media attachment: skipped %d unreadable path(s): %s",
                                 len(_skipped), _skipped,
                             )
-                        if any(p.get("type") == "image_url" for p in _parts):
+                        if any(p.get("type") in {"image_url", "video_url"} for p in _parts):
                             _run_message: Any = _parts
                         else:
-                            # All images failed to read — fall back to plain text.
+                            # All media failed to read — fall back to plain text.
                             _run_message = message
                     except Exception as _img_exc:
                         logger.warning(
-                            "Native image attachment failed, falling back to text: %s",
+                            "Native media attachment failed, falling back to text: %s",
                             _img_exc,
                         )
                         _run_message = message

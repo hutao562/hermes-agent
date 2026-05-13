@@ -88,7 +88,8 @@ class TestFeishuExecApproval:
     """Test send_exec_approval sends an interactive card."""
 
     @pytest.mark.asyncio
-    async def test_sends_interactive_card(self):
+    async def test_sends_interactive_card(self, monkeypatch):
+        monkeypatch.delenv("FEISHU_APPROVAL_CARDS", raising=False)
         adapter = _make_adapter()
 
         mock_response = SimpleNamespace(
@@ -129,7 +130,8 @@ class TestFeishuExecApproval:
         ]
 
     @pytest.mark.asyncio
-    async def test_stores_approval_state(self):
+    async def test_stores_approval_state(self, monkeypatch):
+        monkeypatch.delenv("FEISHU_APPROVAL_CARDS", raising=False)
         adapter = _make_adapter()
 
         mock_response = SimpleNamespace(
@@ -154,7 +156,8 @@ class TestFeishuExecApproval:
         assert state["chat_id"] == "oc_12345"
 
     @pytest.mark.asyncio
-    async def test_not_connected(self):
+    async def test_not_connected(self, monkeypatch):
+        monkeypatch.delenv("FEISHU_APPROVAL_CARDS", raising=False)
         adapter = _make_adapter()
         adapter._client = None
         result = await adapter.send_exec_approval(
@@ -163,7 +166,8 @@ class TestFeishuExecApproval:
         assert result.success is False
 
     @pytest.mark.asyncio
-    async def test_truncates_long_command(self):
+    async def test_truncates_long_command(self, monkeypatch):
+        monkeypatch.delenv("FEISHU_APPROVAL_CARDS", raising=False)
         adapter = _make_adapter()
 
         mock_response = SimpleNamespace(
@@ -185,7 +189,8 @@ class TestFeishuExecApproval:
         assert len(content) < 5000
 
     @pytest.mark.asyncio
-    async def test_multiple_approvals_get_unique_ids(self):
+    async def test_multiple_approvals_get_unique_ids(self, monkeypatch):
+        monkeypatch.delenv("FEISHU_APPROVAL_CARDS", raising=False)
         adapter = _make_adapter()
 
         mock_response = SimpleNamespace(
@@ -206,6 +211,23 @@ class TestFeishuExecApproval:
         assert len(adapter._approval_state) == 2
         ids = list(adapter._approval_state.keys())
         assert ids[0] != ids[1]
+
+    @pytest.mark.asyncio
+    async def test_approval_cards_can_be_disabled(self, monkeypatch):
+        monkeypatch.setenv("FEISHU_APPROVAL_CARDS", "false")
+        adapter = _make_adapter()
+
+        with patch.object(adapter, "_feishu_send_with_retry", new_callable=AsyncMock) as mock_send:
+            result = await adapter.send_exec_approval(
+                chat_id="oc_12345",
+                command="rm -rf /important",
+                session_key="agent:main:feishu:group:oc_12345",
+                description="dangerous deletion",
+            )
+
+        assert result.success is False
+        assert "disabled" in (result.error or "")
+        mock_send.assert_not_called()
 
 
 # ===========================================================================

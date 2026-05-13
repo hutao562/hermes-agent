@@ -1,4 +1,4 @@
-"""Routing helpers for inbound user-attached images.
+"""Routing helpers for inbound user-attached images and videos.
 
 Two modes:
 
@@ -205,6 +205,23 @@ def _guess_mime(path: Path, raw: Optional[bytes] = None) -> str:
     }.get(suffix, "image/jpeg")
 
 
+def _guess_video_mime(path: Path) -> str:
+    mime, _ = mimetypes.guess_type(str(path))
+    if mime and mime.startswith("video/"):
+        return mime
+    suffix = path.suffix.lower()
+    return {
+        ".mp4": "video/mp4",
+        ".m4v": "video/mp4",
+        ".mov": "video/quicktime",
+        ".webm": "video/webm",
+        ".mpeg": "video/mpeg",
+        ".mpg": "video/mpeg",
+        ".avi": "video/mp4",
+        ".mkv": "video/mp4",
+    }.get(suffix, "video/mp4")
+
+
 def _file_to_data_url(path: Path) -> Optional[str]:
     """Encode a local image as a base64 data URL at its native size.
 
@@ -227,9 +244,21 @@ def _file_to_data_url(path: Path) -> Optional[str]:
     return f"data:{mime};base64,{b64}"
 
 
+def _video_file_to_data_url(path: Path) -> Optional[str]:
+    try:
+        raw = path.read_bytes()
+    except Exception as exc:
+        logger.warning("image_routing: failed to read video %s — %s", path, exc)
+        return None
+    mime = _guess_video_mime(path)
+    b64 = base64.b64encode(raw).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
 def build_native_content_parts(
     user_text: str,
     image_paths: List[str],
+    video_paths: Optional[List[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Build an OpenAI-style ``content`` list for a user turn.
 
@@ -257,7 +286,9 @@ def build_native_content_parts(
     """
     skipped: List[str] = []
     image_parts: List[Dict[str, Any]] = []
+    video_parts: List[Dict[str, Any]] = []
     attached_paths: List[str] = []
+    attached_video_paths: List[str] = []
 
     for raw_path in image_paths:
         p = Path(raw_path)
@@ -274,21 +305,43 @@ def build_native_content_parts(
         })
         attached_paths.append(str(raw_path))
 
+    for raw_path in video_paths or []:
+        p = Path(raw_path)
+        if not p.exists() or not p.is_file():
+            skipped.append(str(raw_path))
+            continue
+        data_url = _video_file_to_data_url(p)
+        if not data_url:
+            skipped.append(str(raw_path))
+            continue
+        video_parts.append({
+            "type": "video_url",
+            "video_url": {"url": data_url},
+        })
+        attached_video_paths.append(str(raw_path))
+
     text = (user_text or "").strip()
 
     # If at least one image attached, build a single text part that combines
-    # the user's caption (or a neutral default) with one path hint per image.
-    if attached_paths:
-        base_text = text or "What do you see in this image?"
+    # the user's caption (or a neutral default) with one path hint per media file.
+    if attached_paths or attached_video_paths:
+        if text:
+            base_text = text
+        elif attached_video_paths and not attached_paths:
+            base_text = "Please summarize this video."
+        else:
+            base_text = "What do you see in this image?"
         path_hints = "\n".join(
-            f"[Image attached at: {p}]" for p in attached_paths
+            [f"[Image attached at: {p}]" for p in attached_paths]
+            + [f"[Video attached at: {p}]" for p in attached_video_paths]
         )
         combined_text = f"{base_text}\n\n{path_hints}"
         parts: List[Dict[str, Any]] = [{"type": "text", "text": combined_text}]
         parts.extend(image_parts)
+        parts.extend(video_parts)
         return parts, skipped
 
-    # No images successfully attached — fall back to plain text-only behaviour.
+    # No media successfully attached — fall back to plain text-only behaviour.
     parts = []
     if text:
         parts.append({"type": "text", "text": text})

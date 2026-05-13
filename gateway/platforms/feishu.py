@@ -1800,6 +1800,12 @@ class FeishuAdapter(BasePlatformAdapter):
         ``_handle_card_action_event`` can intercept them and call
         ``resolve_gateway_approval()`` to unblock the waiting agent thread.
         """
+        if os.getenv("FEISHU_APPROVAL_CARDS", "true").strip().lower() in {"0", "false", "no", "off"}:
+            return SendResult(
+                success=False,
+                error="Feishu approval cards disabled by FEISHU_APPROVAL_CARDS",
+            )
+
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
