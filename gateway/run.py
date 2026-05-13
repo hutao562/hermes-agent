@@ -14747,16 +14747,17 @@ class GatewayRunner:
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             # HERMES_FEISHU_CARD_STATUS_CALLBACK_PATCH_BEGIN
-            if _run_still_current() and event_type == "warn":
+            if _run_still_current() and event_type in ("warn", "lifecycle"):
                 try:
                     from hermes_feishu_card.hook_runtime import emit_from_hermes_locals_threadsafe as _hfc_emit_threadsafe
+                    _hfc_evt = "status.warning" if event_type == "warn" else "status.heartbeat"
                     if _hfc_emit_threadsafe({
                         **locals(),
                         "source": source,
                         "message_id": event_message_id,
                         "_hfc_loop": _loop_for_step,
                         "text": message,
-                    }, event_name="status.warning"):
+                    }, event_name=_hfc_evt):
                         return
                 except Exception:
                     pass
@@ -15734,20 +15735,37 @@ class GatewayRunner:
 
         async def _notify_long_running():
             # HERMES_FEISHU_CARD_NOTIFY_PATCH_BEGIN
-            try:
-                from hermes_feishu_card.hook_runtime import emit_from_hermes_locals_threadsafe as _hfc_emit_threadsafe
-                if _run_still_current():
-                    _hfc_heartbeat_text = f"⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})"
-                    if _hfc_emit_threadsafe({
-                        **locals(),
-                        "source": source,
-                        "message_id": event_message_id,
-                        "_hfc_loop": _loop_for_step,
-                        "text": _hfc_heartbeat_text,
-                    }, event_name="status.heartbeat"):
-                        return
-            except Exception:
-                pass
+            if _run_still_current() and _NOTIFY_INTERVAL is not None:
+                try:
+                    from hermes_feishu_card.hook_runtime import emit_from_hermes_locals_threadsafe as _hfc_emit_threadsafe
+                    while True:
+                        await asyncio.sleep(_NOTIFY_INTERVAL)
+                        if not _run_still_current():
+                            break
+                        _elapsed_mins = int((time.time() - _notify_start) // 60)
+                        _status_detail = ""
+                        _agent_ref = agent_holder[0]
+                        if _agent_ref and hasattr(_agent_ref, "get_activity_summary"):
+                            try:
+                                _a = _agent_ref.get_activity_summary()
+                                _parts = [f"iteration {_a['api_call_count']}/{_a['max_iterations']}"]
+                                if _a.get("current_tool"):
+                                    _parts.append(f"running: {_a['current_tool']}")
+                                else:
+                                    _parts.append(_a.get("last_activity_desc", ""))
+                                _status_detail = " — " + ", ".join(_parts)
+                            except Exception:
+                                pass
+                        _hfc_heartbeat_text = f"⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})"
+                        _hfc_emit_threadsafe({
+                            **locals(),
+                            "source": source,
+                            "message_id": event_message_id,
+                            "_hfc_loop": _loop_for_step,
+                            "text": _hfc_heartbeat_text,
+                        }, event_name="status.heartbeat")
+                except Exception:
+                    pass
             # HERMES_FEISHU_CARD_NOTIFY_PATCH_END
             if _NOTIFY_INTERVAL is None:
                 return  # Notifications disabled (gateway_notify_interval: 0)
