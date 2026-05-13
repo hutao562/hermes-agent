@@ -6990,6 +6990,7 @@ class GatewayRunner:
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         # HERMES_FEISHU_CARD_PATCH_BEGIN
+        # HERMES_FEISHU_CARD_STRATEGY gateway_run_013_plus
         try:
             from hermes_feishu_card.hook_runtime import emit_from_hermes_locals as _hfc_emit
             _hfc_emit(locals())
@@ -14745,6 +14746,21 @@ class GatewayRunner:
             _status_thread_metadata = self._thread_metadata_for_source(source, event_message_id) if _progress_thread_id else None
 
         def _status_callback_sync(event_type: str, message: str) -> None:
+            # HERMES_FEISHU_CARD_STATUS_CALLBACK_PATCH_BEGIN
+            if _run_still_current() and event_type == "warn":
+                try:
+                    from hermes_feishu_card.hook_runtime import emit_from_hermes_locals_threadsafe as _hfc_emit_threadsafe
+                    if _hfc_emit_threadsafe({
+                        **locals(),
+                        "source": source,
+                        "message_id": event_message_id,
+                        "_hfc_loop": _loop_for_step,
+                        "text": message,
+                    }, event_name="status.warning"):
+                        return
+                except Exception:
+                    pass
+            # HERMES_FEISHU_CARD_STATUS_CALLBACK_PATCH_END
             if not _status_adapter or not _run_still_current():
                 return
             try:
@@ -15717,6 +15733,22 @@ class GatewayRunner:
         _notify_start = time.time()
 
         async def _notify_long_running():
+            # HERMES_FEISHU_CARD_NOTIFY_PATCH_BEGIN
+            try:
+                from hermes_feishu_card.hook_runtime import emit_from_hermes_locals_threadsafe as _hfc_emit_threadsafe
+                if _run_still_current():
+                    _hfc_heartbeat_text = f"⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})"
+                    if _hfc_emit_threadsafe({
+                        **locals(),
+                        "source": source,
+                        "message_id": event_message_id,
+                        "_hfc_loop": _loop_for_step,
+                        "text": _hfc_heartbeat_text,
+                    }, event_name="status.heartbeat"):
+                        return
+            except Exception:
+                pass
+            # HERMES_FEISHU_CARD_NOTIFY_PATCH_END
             if _NOTIFY_INTERVAL is None:
                 return  # Notifications disabled (gateway_notify_interval: 0)
             _notify_adapter = self.adapters.get(source.platform)
