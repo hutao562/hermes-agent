@@ -2042,6 +2042,16 @@ export function useSessionActions({
         // (ensureSessionState/updateSessionState) instead of an extra resume RPC.
         if (parentStoredId !== null && selectedStoredSessionIdRef.current === parentStoredId) {
           await resumeSession(routedSessionId)
+          // resumeSession swaps the selection but never touches the URL —
+          // resumeSession's `replaceRoute` parameter is accepted and ignored.
+          // The route still points at the PARENT, so isRouteSessionMismatch
+          // (route = parent, selection = child) stays true forever:
+          // ChatRuntimeBoundary suppresses the transcript and the routed
+          // loader never retires — the branched window shows an empty
+          // spinner until the user switches away and back (a sidebar click
+          // routes properly via openSession). Navigate here, same tick as
+          // the selection swap, so route/selection land atomically.
+          navigate(sessionRoute(routedSessionId), { replace: true })
         } else {
           openSessionTile(routedSessionId, 'center')
           patchSessionTile(routedSessionId, { runtimeId: branched.session_id })
@@ -2065,6 +2075,7 @@ export function useSessionActions({
       copy,
       creatingSessionRef,
       ensureSessionState,
+      navigate,
       requestGateway,
       resumeSession,
       selectedStoredSessionIdRef,
