@@ -2054,6 +2054,7 @@ export function useSessionActions({
         // unconditionally). resumeSession reuses the runtime warm-cached above
         // (ensureSessionState/updateSessionState) instead of an extra resume RPC.
         if (parentStoredId !== null && selectedStoredSessionIdRef.current === parentStoredId) {
+          navigate(sessionRoute(routedSessionId), { replace: true })
           await resumeSession(routedSessionId)
         } else {
           openSessionTile(routedSessionId, 'center')
@@ -2078,6 +2079,7 @@ export function useSessionActions({
       copy,
       creatingSessionRef,
       ensureSessionState,
+      navigate,
       requestGateway,
       resumeSession,
       selectedStoredSessionIdRef,
